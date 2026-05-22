@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -167,5 +168,50 @@ func TestTodoService_Update_PreservesCreatedAtAndBumpsUpdatedAt(t *testing.T) {
 	}
 	if !upd.UpdatedAt.After(updatedAt) {
 		t.Fatalf("expected UpdatedAt to be bumped, got %v was %v", upd.UpdatedAt, updatedAt)
+	}
+}
+
+func TestTodoRepository_ConcurrentCreate_NoDuplicateIDs(t *testing.T) {
+	repo := memory.NewTodoRepository()
+	ctx := context.Background()
+
+	const goroutines = 100
+	const iterations = 50
+	var wg sync.WaitGroup
+
+	idChan := make(chan int, goroutines*iterations)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				todo := &domain.Todo{
+					Title: "Concurrent task",
+				}
+				if err := repo.Create(ctx, todo); err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				idChan <- todo.ID
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(idChan)
+
+	// Проверяем все ID на уникальность
+	seenIDs := make(map[int]bool)
+	for id := range idChan {
+		if seenIDs[id] {
+			t.Errorf("found duplicate ID: %d", id)
+		}
+		seenIDs[id] = true
+	}
+
+	expectedTotal := goroutines * iterations
+	if len(seenIDs) != expectedTotal {
+		t.Errorf("expected %d unique IDs, but got %d", expectedTotal, len(seenIDs))
 	}
 }
